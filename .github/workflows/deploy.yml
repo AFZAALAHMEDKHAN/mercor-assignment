@@ -116,7 +116,7 @@ jobs:
           # Export the path of the prepared file
           echo "td_path=./rendered-task-definition.json" >> $GITHUB_OUTPUT
         working-directory: ${{ github.workspace }} # Run from repo root
-        
+
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
         
@@ -133,7 +133,7 @@ jobs:
         id: render-task-definition
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          task-definition: infra/task-definition-template.json
+          task-definition: ${{ steps.prepare_td.outputs.td_path }} 
           container-name: app-container
           image: ${{ env.ECR_REPOSITORY_URL }}:${{ github.sha }}
           
