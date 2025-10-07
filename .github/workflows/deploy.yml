@@ -57,7 +57,6 @@ jobs:
       - name: Terraform Init, Format, Plan, and Apply
         if: steps.filter.outputs.infra == 'true'
         run: |
-          cd ${{ env.TF_WORKING_DIR }}
           terraform init
           terraform fmt -check -recursive
           terraform validate
@@ -98,7 +97,6 @@ jobs:
       # Retrieve Outputs (Reads from S3 state and sets ENV vars)
       - name: Retrieve Infra Outputs from Remote State
         run: |
-          cd ${{ env.TF_WORKING_DIR }}
           # init pulls the remote state from S3
           terraform init
           
