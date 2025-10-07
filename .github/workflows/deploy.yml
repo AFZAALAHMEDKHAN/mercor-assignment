@@ -15,7 +15,7 @@ env:
 
 jobs:
   # ------------------------------------------------------------------
-  # 1. INFRASTRUCTURE JOB (Unchanged - Already Corrected)
+  # 1. INFRASTRUCTURE JOB (No Changes)
   # ------------------------------------------------------------------
   infra_apply:
     name: Terraform Apply
@@ -65,7 +65,7 @@ jobs:
 
 
   # ------------------------------------------------------------------
-  # 2. APPLICATION JOB (Updated with Correct Action)
+  # 2. APPLICATION JOB (FIXED: Using JQ + AWS CLI for Task Definition)
   # ------------------------------------------------------------------
   app_deploy:
     name: Build and Deploy App
@@ -102,21 +102,6 @@ jobs:
           echo "ECS_TASK_EXECUTION_ROLE_ARN=$(terraform output -raw ecs_task_execution_role_arn)" >> $GITHUB_ENV
         working-directory: ${{ env.TF_WORKING_DIR }}
         
-      - name: Prepare Task Definition for Rendering
-        id: prepare_td
-        run: |
-          # 1. Copy the template to a neutral, temporary location 
-          # (Runner's workspace root) to ensure it's clean for this run.
-          cp ${{ env.TF_WORKING_DIR }}/task-definition-template.json ./rendered-task-definition.json
-
-          # 2. Inject the Task Execution Role ARN using sed on the copied file.
-          # We use a custom delimiter (@) to avoid conflicts if the ARN contains slashes (/)
-          sed -i "s@<TASK_EXECUTION_ROLE_ARN>@${{ env.ECS_TASK_EXECUTION_ROLE_ARN }}@g" ./rendered-task-definition.json
-
-          # Export the path of the prepared file
-          echo "td_path=./rendered-task-definition.json" >> $GITHUB_OUTPUT
-        working-directory: ${{ github.workspace }} # Run from repo root
-
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
         
@@ -128,20 +113,36 @@ jobs:
           docker build -t $ECR_REGISTRY:$IMAGE_TAG ./app
           docker push $ECR_REGISTRY:$IMAGE_TAG
 
-      # Render the Task Definition with the new image tag
-      - name: Render Task Definition
-        id: render-task-definition
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: ${{ steps.prepare_td.outputs.td_path }} 
-          container-name: app-container
-          image: ${{ env.ECR_REPOSITORY_URL }}:${{ github.sha }}
+      # NEW/REPLACED STEP: Inject Variables, Register Task Definition (Guarantees Valid JSON)
+      - name: Inject Variables and Register Task Definition
+        id: register_task_def
+        run: |
+          # 1. Define the input template path
+          TASK_DEF_FILE="${{ env.TF_WORKING_DIR }}/task-definition-template.json"
           
+          # 2. Use jq to safely inject the ARN and Image URI, preserving JSON validity.
+          # The result is saved to a clean file in the current directory.
+          jq --arg arn "${{ env.ECS_TASK_EXECUTION_ROLE_ARN }}" \
+             --arg image "${{ env.ECR_REPOSITORY_URL }}:${{ github.sha }}" \
+             '.executionRoleArn = $arn | .containerDefinitions[0].image = $image' \
+             "$TASK_DEF_FILE" > rendered-task-definition.json
+
+          # 3. Register the new revision with ECS (this validates the JSON structure)
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://rendered-task-definition.json \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          # Export the validated ARN to pass to the deployment step
+          echo "NEW_TASK_DEFINITION_ARN=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
+        working-directory: ${{ github.workspace }} # Run from workspace root to access template and newly created files
+
       # CRITICAL FIX: Use the correct action path for CodeDeploy
       - name: Deploy to ECS via CodeDeploy
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
-          task-definition: ${{ steps.render-task-definition.outputs.task-definition }}
+          # FIX: Pass the ARN string directly to the action
+          task-definition: ${{ steps.register_task_def.outputs.NEW_TASK_DEFINITION_ARN }}
           service: ${{ env.ECS_SERVICE_NAME }}
           cluster: ${{ env.ECS_CLUSTER_NAME }}
           wait-for-service-stability: true
