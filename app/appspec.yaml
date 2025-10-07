@@ -7,7 +7,6 @@ Resources:
         LoadBalancerInfo:
           TargetGroupPairInfo:
             TargetGroups:
-              # These names MUST match the names defined in your alb.tf
               - Name: ecs-bluegreen-blue-tg
               - Name: ecs-bluegreen-green-tg
             ProdTrafficRoute:
