@@ -1,7 +1,12 @@
-name: ECS Deployment (Infra + App)
+name: ECS Deployment (App + Infra)
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/**'
+      - 'infra/**'
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
@@ -9,72 +14,16 @@ env:
   TF_WORKING_DIR: infra
 
 jobs:
-  # ------------------------------------------------------------------
-  # 1. INFRASTRUCTURE JOB
-  # ------------------------------------------------------------------
-  infra_apply:
-    name: Terraform Apply
+  app_deploy:
+    name: Build and Deploy App
     runs-on: ubuntu-latest
     environment: production
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-
-      - name: Check for infra changes
-        id: filter
-        uses: dorny/paths-filter@v2
-        with:
-          filters: |
-            infra:
-              - 'infra/**'
-              
-      - name: Skip if no infra changes
-        if: steps.filter.outputs.infra != 'true'
-        run: echo "No changes detected in infra/, skipping terraform apply."
         
       - name: Configure AWS Credentials
-        if: steps.filter.outputs.infra == 'true'
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Setup Terraform
-        if: steps.filter.outputs.infra == 'true'
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: 1.6.0
-          terraform_wrapper: false
-          
-      - name: Terraform Init, Format, Plan, and Apply
-        if: steps.filter.outputs.infra == 'true'
-        run: |
-          terraform init
-          terraform fmt -check -recursive
-          terraform validate
-          terraform plan -input=false -out=tfplan
-          terraform apply -auto-approve tfplan
-        working-directory: ${{ env.TF_WORKING_DIR }}
-
-
-  # ------------------------------------------------------------------
-  # 2. APPLICATION JOB (Build + Deploy with CodeDeploy)
-  # ------------------------------------------------------------------
-  app_deploy:
-    name:  Build and Deploy App
-    runs-on: ubuntu-latest
-    environment: production
-    
-    needs: [infra_apply]
-    if: success() || always()
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-        
-      - name: Configure AWS Credentials (for deployment)
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -87,8 +36,8 @@ jobs:
           terraform_version: 1.6.0
           terraform_wrapper: false
           
-      # Retrieve Outputs (Reads from remote Terraform state)
-      - name: Retrieve Infra Outputs from Remote State
+      # Retrieve Outputs from Terraform Remote State
+      - name: Retrieve Infra Outputs
         run: |
           terraform init
           echo "ECR_REPOSITORY_URL=$(terraform output -raw ecr_repository_url)" >> $GITHUB_ENV
@@ -100,7 +49,7 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
         
-      - name: Build, tag, and push image to ECR
+      - name: Build, tag, and push Docker image
         env:
           ECR_REGISTRY: ${{ env.ECR_REPOSITORY_URL }}
           IMAGE_TAG: ${{ github.sha }}
@@ -108,32 +57,26 @@ jobs:
           docker build -t $ECR_REGISTRY:$IMAGE_TAG ./app
           docker push $ECR_REGISTRY:$IMAGE_TAG
 
-      # --------------------------------------------------------------
       # Register new ECS Task Definition Revision
-      # --------------------------------------------------------------
-      - name: Register new ECS task definition revision
+      - name: Register ECS Task Definition Revision
         id: register-task
         run: |
-          echo "Fetching current task definition..."
           TASK_DEF_ARN=$(aws ecs describe-services \
             --cluster $ECS_CLUSTER_NAME \
             --services $ECS_SERVICE_NAME \
             --query "services[0].taskDefinition" \
             --output text)
-
-          echo "Downloading current task definition JSON..."
+          
           aws ecs describe-task-definition \
             --task-definition $TASK_DEF_ARN \
             --query "taskDefinition" > taskdef.json
 
-          echo "Preparing new task definition JSON..."
           NEW_IMAGE="$ECR_REPOSITORY_URL:${{ github.sha }}"
           jq --arg IMAGE "$NEW_IMAGE" '.containerDefinitions[0].image = $IMAGE |
             del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
                 .compatibilities, .registeredAt, .registeredBy)' \
             taskdef.json > new-taskdef.json
 
-          echo "Registering new ECS task definition revision..."
           NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
             --cli-input-json file://new-taskdef.json \
             --query "taskDefinition.taskDefinitionArn" \
@@ -141,13 +84,10 @@ jobs:
 
           echo "NEW_TASK_DEF_ARN=$NEW_TASK_DEF_ARN" >> $GITHUB_ENV
 
-      # --------------------------------------------------------------
       # Trigger CodeDeploy Deployment (Blue/Green)
-      # --------------------------------------------------------------
-      - name: Create new CodeDeploy deployment
+      - name: Create CodeDeploy Deployment
         id: codedeploy
         run: |
-          echo "Creating CodeDeploy deployment..."
           DEPLOYMENT_ID=$(aws deploy create-deployment \
             --application-name "${{ env.PROJECT_NAME }}-codedeploy-app" \
             --deployment-group-name "${{ env.PROJECT_NAME }}-dg" \
@@ -164,11 +104,9 @@ jobs:
           echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> $GITHUB_ENV
           echo "Deployment started with ID: $DEPLOYMENT_ID"
 
-      # --------------------------------------------------------------
-      # Wait for CodeDeploy to Complete (Fail if Rollback or Error)
-      # --------------------------------------------------------------
-      - name: Wait for CodeDeploy deployment to finish
+      # Wait for CodeDeploy to Complete
+      - name: Wait for CodeDeploy deployment
         run: |
           echo "Waiting for deployment $DEPLOYMENT_ID to complete..."
           aws deploy wait deployment-successful --deployment-id $DEPLOYMENT_ID
-          echo "Deployment succeeded "
+          echo "Deployment succeeded"
