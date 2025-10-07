@@ -18,7 +18,7 @@ jobs:
   # 1. INFRASTRUCTURE JOB (No Changes)
   # ------------------------------------------------------------------
   infra_apply:
-    name: Terraform Apply
+    name: 🏗️ Terraform Apply
     runs-on: ubuntu-latest
     environment: production
     
@@ -65,10 +65,10 @@ jobs:
 
 
   # ------------------------------------------------------------------
-  # 2. APPLICATION JOB (FIXED: Using JQ + AWS CLI for Task Definition)
+  # 2. APPLICATION JOB (FINAL FIX: Pass JSON string to avoid file path error)
   # ------------------------------------------------------------------
   app_deploy:
-    name: Build and Deploy App
+    name: 🚀 Build and Deploy App
     runs-on: ubuntu-latest
     environment: production
     
@@ -113,36 +113,29 @@ jobs:
           docker build -t $ECR_REGISTRY:$IMAGE_TAG ./app
           docker push $ECR_REGISTRY:$IMAGE_TAG
 
-      # NEW/REPLACED STEP: Inject Variables, Register Task Definition (Guarantees Valid JSON)
-      - name: Inject Variables and Register Task Definition
-        id: register_task_def
+      #  NEW/REPLACED STEP: Inject Variables and Export JSON String
+      - name: Inject Variables and Export Task Definition JSON
+        id: prepare_task_def_json
         run: |
-          # 1. Define the input template path
           TASK_DEF_FILE="${{ env.TF_WORKING_DIR }}/task-definition-template.json"
           
-          # 2. Use jq to safely inject the ARN and Image URI, preserving JSON validity.
-          # The result is saved to a clean file in the current directory.
-          jq --arg arn "${{ env.ECS_TASK_EXECUTION_ROLE_ARN }}" \
+          # Use jq to safely inject the ARN and Image URI, storing the entire JSON object to output.
+          FINAL_TASK_DEF_JSON=$(jq --arg arn "${{ env.ECS_TASK_EXECUTION_ROLE_ARN }}" \
              --arg image "${{ env.ECR_REPOSITORY_URL }}:${{ github.sha }}" \
              '.executionRoleArn = $arn | .containerDefinitions[0].image = $image' \
-             "$TASK_DEF_FILE" > rendered-task-definition.json
+             "$TASK_DEF_FILE")
 
-          # 3. Register the new revision with ECS (this validates the JSON structure)
-          TASK_DEF_ARN=$(aws ecs register-task-definition \
-            --cli-input-json file://rendered-task-definition.json \
-            --region ${{ env.AWS_REGION }} \
-            --query 'taskDefinition.taskDefinitionArn' --output text)
+          # Export the validated JSON string directly to the job output
+          echo "::set-output name=json_content::$FINAL_TASK_DEF_JSON"
+        working-directory: ${{ github.workspace }}
 
-          # Export the validated ARN to pass to the deployment step
-          echo "NEW_TASK_DEFINITION_ARN=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
-        working-directory: ${{ github.workspace }} # Run from workspace root to access template and newly created files
-
-      # CRITICAL FIX: Use the correct action path for CodeDeploy
+      # Deploy to ECS via CodeDeploy
       - name: Deploy to ECS via CodeDeploy
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
-          # FIX: Pass the ARN string directly to the action
-          task-definition: ${{ steps.register_task_def.outputs.NEW_TASK_DEFINITION_ARN }}
+          #  FIX: Pass the raw JSON string content. The action's documentation suggests
+          # this input accepts both file path and JSON string content.
+          task-definition: ${{ steps.prepare_task_def_json.outputs.json_content }}
           service: ${{ env.ECS_SERVICE_NAME }}
           cluster: ${{ env.ECS_CLUSTER_NAME }}
           wait-for-service-stability: true
