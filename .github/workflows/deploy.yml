@@ -51,6 +51,7 @@ jobs:
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.6.0
+          terraform_wrapper: false
           
       - name: Terraform Init, Format, Plan, and Apply
         if: steps.filter.outputs.infra == 'true'
@@ -89,6 +90,7 @@ jobs:
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.6.0
+          terraform_wrapper: false
           
       # Retrieve Outputs (Reads from S3 state and sets ENV vars)
       - name: Retrieve Infra Outputs from Remote State
