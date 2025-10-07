@@ -154,7 +154,7 @@ jobs:
         run: |
           echo "Creating CodeDeploy deployment..."
           DEPLOYMENT_ID=$(aws deploy create-deployment \
-            --application-name "${{ env.PROJECT_NAME }}-app" \
+            --application-name "${{ env.PROJECT_NAME }}-codedeploy-app" \
             --deployment-group-name "${{ env.PROJECT_NAME }}-dg" \
             --revision '{
                 "revisionType": "AppSpecContent",
