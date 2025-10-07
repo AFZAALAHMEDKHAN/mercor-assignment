@@ -15,7 +15,7 @@ The project consists of:
 
 ---
 
-## Workflow Flow & Zero-Downtime Handling
+## Workflow Flow & Zero-Downtime Handling (Proposed)
 
 The GitHub Actions workflow triggers on **pushes to the `main` branch** affecting `app/` or `infra/` directories. It contains **two main jobs**: `infra_apply` and `app_deploy`.
 
