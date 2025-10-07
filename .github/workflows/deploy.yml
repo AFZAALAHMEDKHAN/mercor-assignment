@@ -1,4 +1,4 @@
-name: Production ECS Deployment (Split)
+name: ECS Deployment (Infra + App)
 
 on:
   push:
@@ -18,7 +18,7 @@ jobs:
   # 1. INFRASTRUCTURE JOB
   # ------------------------------------------------------------------
   infra_apply:
-    name: 🏗️ Terraform Apply
+    name: Terraform Apply
     runs-on: ubuntu-latest
     environment: production
     
@@ -68,7 +68,7 @@ jobs:
   # 2. APPLICATION JOB (Build + Deploy with CodeDeploy)
   # ------------------------------------------------------------------
   app_deploy:
-    name: 🚀 Build and Deploy App
+    name:  Build and Deploy App
     runs-on: ubuntu-latest
     environment: production
     
@@ -176,4 +176,4 @@ jobs:
         run: |
           echo "Waiting for deployment $DEPLOYMENT_ID to complete..."
           aws deploy wait deployment-successful --deployment-id $DEPLOYMENT_ID
-          echo "Deployment succeeded 🎉"
+          echo "Deployment succeeded "
