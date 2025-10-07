@@ -31,11 +31,11 @@ variable "availability_zones" {
 variable "fargate_cpu" {
   description = "Fargate Task CPU units (e.g., 256, 512, 1024)"
   type        = number
-  default     = "256"
+  default     = "512"
 }
 
 variable "fargate_memory" {
   description = "Fargate Task Memory (e.g., 512, 1024, 2048)"
   type        = number
-  default     = "512"
+  default     = "1024"
 }
