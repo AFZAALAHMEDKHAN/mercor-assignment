@@ -1,0 +1,32 @@
+{
+  "containerDefinitions": [
+    {
+      "name": "app-container",
+      "image": "<IMAGE_URI>", 
+      "cpu": 256,
+      "memory": 512,
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 80,
+          "hostPort": 80,
+          "protocol": "tcp"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ecs-bluegreen",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ],
+  "family": "ecs-bluegreen-task",
+  "executionRoleArn": "<TASK_EXECUTION_ROLE_ARN>",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "256",
+  "memory": "512"
+}

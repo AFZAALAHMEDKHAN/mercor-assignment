@@ -1,0 +1,16 @@
+version: 0.0
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        TaskDefinition: <TASK_DEFINITION> # CodeDeploy will inject the new Task ARN here
+        LoadBalancerInfo:
+          TargetGroupPairInfo:
+            TargetGroups:
+              # These names MUST match the names defined in your alb.tf
+              - Name: ecs-bluegreen-blue-tg
+              - Name: ecs-bluegreen-green-tg
+            ProdTrafficRoute:
+              ListenerArns:
+                # CodeDeploy will inject the correct Listener ARN here
+                - <LISTENER_ARN>
