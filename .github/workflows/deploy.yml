@@ -156,7 +156,12 @@ jobs:
           DEPLOYMENT_ID=$(aws deploy create-deployment \
             --application-name "${{ env.PROJECT_NAME }}-app" \
             --deployment-group-name "${{ env.PROJECT_NAME }}-dg" \
-            --revision revisionType=AppSpecContent,appSpecContent="{\"version\":1,\"Resources\":[{\"TargetService\":{\"Type\":\"AWS::ECS::Service\",\"Properties\":{\"TaskDefinition\":\"$NEW_TASK_DEF_ARN\",\"LoadBalancerInfo\":{\"ContainerName\":\"app-container\",\"ContainerPort\":80}}}}]}" \
+            --revision '{
+                "revisionType": "AppSpecContent",
+                "appSpecContent": {
+                  "content": "{\"version\":1,\"Resources\":[{\"TargetService\":{\"Type\":\"AWS::ECS::Service\",\"Properties\":{\"TaskDefinition\":\"'"$NEW_TASK_DEF_ARN"'\",\"LoadBalancerInfo\":{\"ContainerName\":\"app-container\",\"ContainerPort\":80}}}}]}"
+                }
+              }' \
             --description "GitHub Actions deployment for commit ${{ github.sha }}" \
             --query "deploymentId" \
             --output text)
