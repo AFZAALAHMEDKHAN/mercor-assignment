@@ -1,0 +1,67 @@
+# Detailed Architecture Description
+
+## VPC Setup
+- Created using Terraform AWS VPC module
+- CIDR: 10.0.0.0/16
+- 2 public subnets: 10.0.1.0/24, 10.0.2.0/24
+- AZs: us-east-1a, us-east-1b
+- NAT gateway disabled, tasks are public-facing
+- DNS hostnames and support enabled
+- Tags applied for project ownership
+
+## ECS Components
+- Cluster: FARGATE type, container insights enabled
+- Task Definition:
+  - CPU: 256 units
+  - Memory: 512 MB
+  - Execution role: AmazonECSTaskExecutionRolePolicy
+  - CloudWatch logs configured
+- Service:
+  - Desired count: 2 tasks
+  - Blue/Green deployment enabled
+  - Network config: public subnets, SG allows traffic only from ALB
+  - Container listens on port 80
+
+## ALB & Target Groups
+- Public ALB on port 80
+- Blue and Green target groups for traffic routing
+- ALB access logs stored in S3 bucket `${var.project_name}-alb-logs`
+- Health checks on `/` endpoint
+- Security group allows HTTP traffic from 0.0.0.0/0
+
+## CodeDeploy Setup
+- Application: `${var.project_name}-codedeploy-app`
+- Deployment group: `${var.project_name}-dg`
+- Blue/Green with traffic control
+- deployment_ready_option: CONTINUE_DEPLOYMENT, 0-minute wait
+- Original Blue tasks terminated only after Green tasks healthy
+- Auto rollback enabled on deployment failure
+
+## Terraform Best Practices
+- Remote backend: S3 with encryption
+- `depends_on` ensures provisioning order
+- Modules used for reusable VPC setup
+- Outputs for ECS cluster, service, task execution role, ALB DNS, target groups, ECR repo
+
+## IAM Roles & Permissions
+- ECS Task Execution Role: AmazonECSTaskExecutionRolePolicy
+- ECS Service Role: AmazonEC2ContainerServiceRole
+- CodeDeploy Role: AWSCodeDeployRoleForECS
+- **Note:** Admin-level credentials used for GitHub Actions demo; should use least-privilege policies in production
+
+## CI/CD Workflow
+- Infrastructure apply (`infra_apply`) job: Terraform plan & apply
+- Application deploy (`app_deploy`) job: build, push, task registration, CodeDeploy deployment
+- CLI used to handle task definition registration and CodeDeploy deployment due to JSON/AppSpec issues in GitHub Actions
+
+## Zero-Downtime Implementation
+- **Application:** Blue/Green deployment keeps old tasks alive until new tasks pass health checks
+- **Infrastructure:** Terraform sequencing prevents downtime using `depends_on`
+- Traffic shifts safely only after deployment success
+- Rollbacks occur automatically if failure detected
+
+## Production Considerations & Lessons
+- ALB logs and CloudWatch for observability
+- Security: ECS tasks only accessible via ALB
+- IAM roles require fine-grained permissions
+- Future improvements: CI/CD testing, HTTPS, notifications (SNS/Slack)
