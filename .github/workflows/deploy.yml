@@ -102,10 +102,20 @@ jobs:
           echo "ECS_TASK_EXECUTION_ROLE_ARN=$(terraform output -raw ecs_task_execution_role_arn)" >> $GITHUB_ENV
         working-directory: ${{ env.TF_WORKING_DIR }}
         
-      # Inject Task Execution Role ARN
-      - name: Inject Task Execution Role ARN
+      - name: Prepare Task Definition for Rendering
+        id: prepare_td
         run: |
-          sed -i "s|<TASK_EXECUTION_ROLE_ARN>|${{ env.ECS_TASK_EXECUTION_ROLE_ARN }}|g" ${{ env.TF_WORKING_DIR }}/task-definition-template.json
+          # 1. Copy the template to a neutral, temporary location 
+          # (Runner's workspace root) to ensure it's clean for this run.
+          cp ${{ env.TF_WORKING_DIR }}/task-definition-template.json ./rendered-task-definition.json
+
+          # 2. Inject the Task Execution Role ARN using sed on the copied file.
+          # We use a custom delimiter (@) to avoid conflicts if the ARN contains slashes (/)
+          sed -i "s@<TASK_EXECUTION_ROLE_ARN>@${{ env.ECS_TASK_EXECUTION_ROLE_ARN }}@g" ./rendered-task-definition.json
+
+          # Export the path of the prepared file
+          echo "td_path=./rendered-task-definition.json" >> $GITHUB_OUTPUT
+        working-directory: ${{ github.workspace }} # Run from repo root
         
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
