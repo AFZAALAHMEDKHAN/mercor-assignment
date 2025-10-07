@@ -5,8 +5,8 @@ on:
     branches:
       - main
     paths:
-      - 'app/**'    # Trigger application deployment
-      - 'infra/**'  # Trigger infrastructure update
+      - 'app/**'
+      - 'infra/**'
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
@@ -15,10 +15,10 @@ env:
 
 jobs:
   # ------------------------------------------------------------------
-  # 1. INFRASTRUCTURE JOB: Provision/Update Platform (Terraform Apply)
+  # 1. INFRASTRUCTURE JOB (Unchanged - Already Corrected)
   # ------------------------------------------------------------------
   infra_apply:
-    name: 🏗️ Terraform Apply
+    name: Terraform Apply
     runs-on: ubuntu-latest
     environment: production
     
@@ -26,7 +26,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      # Use paths-filter to check if infra/ folder was modified
       - name: Check for infra changes
         id: filter
         uses: dorny/paths-filter@v2
@@ -39,7 +38,6 @@ jobs:
         if: steps.filter.outputs.infra != 'true'
         run: echo "No changes detected in infra/, skipping terraform apply."
         
-    # Terraform Execution (Only runs if infra changes were detected)
       - name: Configure AWS Credentials
         if: steps.filter.outputs.infra == 'true'
         uses: aws-actions/configure-aws-credentials@v2
@@ -66,7 +64,7 @@ jobs:
 
 
   # ------------------------------------------------------------------
-  # 2. APPLICATION JOB: Build, Push, Deploy (Always Runs on app/infra change)
+  # 2. APPLICATION JOB (Updated with Correct Action)
   # ------------------------------------------------------------------
   app_deploy:
     name: Build and Deploy App
@@ -74,13 +72,12 @@ jobs:
     environment: production
     
     needs: [infra_apply] 
-    if: success() || always() # Runs if infra_apply succeeds or is skipped
+    if: success() || always()
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
         
-      # Configure AWS for deployment actions (ECR, ECS, CodeDeploy)
       - name: Configure AWS Credentials (for deployment)
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -88,7 +85,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Setup Terraform (to read outputs)
       - name: Setup Terraform (to read outputs)
         uses: hashicorp/setup-terraform@v2
         with:
@@ -97,23 +93,18 @@ jobs:
       # Retrieve Outputs (Reads from S3 state and sets ENV vars)
       - name: Retrieve Infra Outputs from Remote State
         run: |
-          # init pulls the remote state from S3
           terraform init
-          
-          # Read outputs and set them as environment variables
           echo "ECR_REPOSITORY_URL=$(terraform output -raw ecr_repository_url)" >> $GITHUB_ENV
           echo "ECS_CLUSTER_NAME=$(terraform output -raw ecs_cluster_name)" >> $GITHUB_ENV
           echo "ECS_SERVICE_NAME=$(terraform output -raw ecs_service_name)" >> $GITHUB_ENV
           echo "ECS_TASK_EXECUTION_ROLE_ARN=$(terraform output -raw ecs_task_execution_role_arn)" >> $GITHUB_ENV
         working-directory: ${{ env.TF_WORKING_DIR }}
         
-      # NEW STEP: Inject the ARN into the template file
+      # Inject Task Execution Role ARN
       - name: Inject Task Execution Role ARN
         run: |
-          # Use sed to replace the placeholder with the actual ARN before rendering
           sed -i "s|<TASK_EXECUTION_ROLE_ARN>|${{ env.ECS_TASK_EXECUTION_ROLE_ARN }}|g" ${{ env.TF_WORKING_DIR }}/task-definition-template.json
-          
-      # Build, Push, and Deploy
+        
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
         
@@ -130,18 +121,20 @@ jobs:
         id: render-task-definition
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          # Now the template file contains the correct, injected ARN
           task-definition: infra/task-definition-template.json
           container-name: app-container
           image: ${{ env.ECR_REPOSITORY_URL }}:${{ github.sha }}
           
-      # Trigger Blue/Green Deployment via CodeDeploy
+      # CRITICAL FIX: Use the correct action path for CodeDeploy
       - name: Deploy to ECS via CodeDeploy
-        uses: aws-actions/amazon-ecs-deploy@v1
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
+          task-definition: ${{ steps.render-task-definition.outputs.task-definition }}
           service: ${{ env.ECS_SERVICE_NAME }}
           cluster: ${{ env.ECS_CLUSTER_NAME }}
-          codedeploy-app: ${{ env.PROJECT_NAME }}-codedeploy-app
+          wait-for-service-stability: true
+          
+          # Additional inputs required for CodeDeploy support
+          codedeploy-appspec: app/appspec.yaml
+          codedeploy-application: ${{ env.PROJECT_NAME }}-codedeploy-app
           codedeploy-deployment-group: ${{ env.PROJECT_NAME }}-dg
-          task-definition: ${{ steps.render-task-definition.outputs.task-definition }}
-          appspec: app/appspec.yaml
