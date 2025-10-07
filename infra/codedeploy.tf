@@ -30,7 +30,7 @@ resource "aws_codedeploy_deployment_group" "ecs_deployment_group" {
     }
 
     deployment_ready_option {
-      action_on_timeout    = "STOP_DEPLOYMENT"
+      action_on_timeout    = "CONTINUE_DEPLOYMENT"
       wait_time_in_minutes = 5
     }
 
