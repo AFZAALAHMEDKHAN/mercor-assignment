@@ -65,8 +65,9 @@ jobs:
 
 
 
+
   # ------------------------------------------------------------------
-  # 2. APPLICATION JOB (FINAL FIX: Use a Temporary File Path)
+  # 2. APPLICATION JOB (FINAL FIX: Using AWS CLI for Deployment)
   # ------------------------------------------------------------------
   app_deploy:
     name: 🚀 Build and Deploy App
@@ -87,13 +88,13 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # --- Setup/Retrieve Outputs (Remain the same) ---
       - name: Setup Terraform (to read outputs)
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.6.0
           terraform_wrapper: false
           
-      # Retrieve Outputs (Reads from S3 state and sets ENV vars)
       - name: Retrieve Infra Outputs from Remote State
         run: |
           terraform init
@@ -103,6 +104,7 @@ jobs:
           echo "ECS_TASK_EXECUTION_ROLE_ARN=$(terraform output -raw ecs_task_execution_role_arn)" >> $GITHUB_ENV
         working-directory: ${{ env.TF_WORKING_DIR }}
         
+      # --- Build/Push (Remain the same) ---
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
         
@@ -114,34 +116,49 @@ jobs:
           docker build -t $ECR_REGISTRY:$IMAGE_TAG ./app
           docker push $ECR_REGISTRY:$IMAGE_TAG
 
-      # 💥 FINAL SOLUTION STEP: Inject Variables and Write to Temporary File
-      - name: Inject Variables and Write Task Definition JSON
-        id: prepare_task_def_file
+      # ------------------------------------------------------------------
+      # 💥 NEW STEP: Inject Variables, Register TD, and Trigger CodeDeploy CLI
+      # ------------------------------------------------------------------
+      - name: Register TD and Trigger CodeDeploy
+        id: register_and_deploy
         run: |
+          # 1. Inject Variables and Write Task Definition JSON to a temp file
           TASK_DEF_FILE="${{ env.TF_WORKING_DIR }}/task-definition-template.json"
-          TEMP_JSON_PATH="task-definition-${{ github.sha }}.json" # Unique temporary file name
+          TEMP_TD_FILE="./rendered-task-definition.json"
           
-          # Use jq to inject variables and write the result to a clean file
+          # Use jq to safely inject the ARN and Image URI
           jq --arg arn "${{ env.ECS_TASK_EXECUTION_ROLE_ARN }}" \
              --arg image "${{ env.ECR_REPOSITORY_URL }}:${{ github.sha }}" \
              '.executionRoleArn = $arn | .containerDefinitions[0].image = $image' \
-             "$TASK_DEF_FILE" > "$TEMP_JSON_PATH"
-          
-          # Export the path of the clean file
-          echo "::set-output name=final_td_path::$TEMP_JSON_PATH"
-        working-directory: ${{ github.workspace }} # Run from workspace root
+             "$TASK_DEF_FILE" > "$TEMP_TD_FILE"
 
-      # Deploy to ECS via CodeDeploy
-      - name: Deploy to ECS via CodeDeploy
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          # 💥 FIX: Pass the guaranteed local file path
-          task-definition: ${{ steps.prepare_task_def_file.outputs.final_td_path }}
-          service: ${{ env.ECS_SERVICE_NAME }}
-          cluster: ${{ env.ECS_CLUSTER_NAME }}
-          wait-for-service-stability: true
+          # 2. Register the new Task Definition using the AWS CLI
+          # This guarantees the JSON is valid and gives us a clean ARN.
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://"$TEMP_TD_FILE" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          echo "Registered Task Definition: $TASK_DEF_ARN"
           
-          # Additional inputs required for CodeDeploy support
-          codedeploy-appspec: app/appspec.yaml
-          codedeploy-application: ${{ env.PROJECT_NAME }}-codedeploy-app
-          codedeploy-deployment-group: ${{ env.PROJECT_NAME }}-dg
+          # 3. Use the AWS CLI to TRIGGER THE CODE DEPLOYMENT
+          # This creates the ECS deployment based on the new Task Definition ARN
+          DEPLOYMENT_ID=$(aws deploy create-deployment \
+            --application-name ${{ env.PROJECT_NAME }}-codedeploy-app \
+            --deployment-group-name ${{ env.PROJECT_NAME }}-dg \
+            --ecs-services serviceNames=${{ env.ECS_SERVICE_NAME }},clusterName=${{ env.ECS_CLUSTER_NAME }} \
+            --task-definitions "$TASK_DEF_ARN" \
+            --appspec-content file://app/appspec.yaml \
+            --appspec-content-type YAML \
+            --query deploymentId --output text)
+
+          echo "CodeDeploy deployment started with ID: $DEPLOYMENT_ID"
+          
+          # 4. Wait for deployment completion (essential for CI/CD flow control)
+          echo "Waiting for deployment to complete..."
+          aws deploy wait deployment-successful --deployment-id $DEPLOYMENT_ID || {
+             echo "Deployment failed. Check CodeDeploy console for details."
+             exit 1
+          }
+
+        working-directory: ${{ github.workspace }}
