@@ -4,64 +4,70 @@
 - Created using Terraform AWS VPC module
 - CIDR: 10.0.0.0/16
 - 2 public subnets: 10.0.1.0/24, 10.0.2.0/24
-- AZs: us-east-1a, us-east-1b
-- NAT gateway disabled, tasks are public-facing
+- Availability Zones: us-east-1a, us-east-1b
+- NAT gateway disabled; ECS tasks are public-facing
 - DNS hostnames and support enabled
-- Tags applied for project ownership
+- Tags applied for project ownership and cost allocation
 
 ## ECS Components
-- Cluster: FARGATE type, container insights enabled
-- Task Definition:
-  - CPU: 256 units
-  - Memory: 512 MB
+- **Cluster:** FARGATE type, Container Insights enabled
+- **Task Definition:**
+  - CPU: 256 units (configurable via Terraform variable)
+  - Memory: 512 MB (configurable via Terraform variable)
   - Execution role: AmazonECSTaskExecutionRolePolicy
-  - CloudWatch logs configured
-- Service:
+  - CloudWatch logs configured for observability
+- **Service:**
   - Desired count: 2 tasks
-  - Blue/Green deployment enabled
-  - Network config: public subnets, SG allows traffic only from ALB
+  - Blue/Green deployment enabled via CodeDeploy
+  - Network configuration: public subnets, security group allows traffic only from ALB
   - Container listens on port 80
+  - New Task Definition revisions are registered for infrastructure changes (CPU/memory updates) to ensure zero downtime
 
 ## ALB & Target Groups
-- Public ALB on port 80
-- Blue and Green target groups for traffic routing
+- Public ALB listening on port 80
+- Separate Blue and Green target groups for traffic routing
 - ALB access logs stored in S3 bucket `${var.project_name}-alb-logs`
-- Health checks on `/` endpoint
+- Health checks configured on `/` endpoint
 - Security group allows HTTP traffic from 0.0.0.0/0
 
 ## CodeDeploy Setup
 - Application: `${var.project_name}-codedeploy-app`
 - Deployment group: `${var.project_name}-dg`
-- Blue/Green with traffic control
-- deployment_ready_option: CONTINUE_DEPLOYMENT, 0-minute wait
-- Original Blue tasks terminated only after Green tasks healthy
-- Auto rollback enabled on deployment failure
+- Blue/Green deployment strategy with traffic control
+- `deployment_ready_option`: CONTINUE_DEPLOYMENT (traffic shifts only after health checks pass)
+- Original Blue tasks terminated only after Green tasks are healthy
+- Auto rollback enabled for deployment failures
 
 ## Terraform Best Practices
-- Remote backend: S3 with encryption
-- `depends_on` ensures provisioning order
-- Modules used for reusable VPC setup
-- Outputs for ECS cluster, service, task execution role, ALB DNS, target groups, ECR repo
+- Remote backend: S3 with encryption enabled
+- `depends_on` ensures correct provisioning order (VPC → ALB → Target Groups → ECS Service → Tasks)
+- Modules used for reusable infrastructure components (e.g., VPC, ALB)
+- Outputs provided for ECS cluster, service, task execution role, ALB DNS, target groups, ECR repository
 
 ## IAM Roles & Permissions
-- ECS Task Execution Role: AmazonECSTaskExecutionRolePolicy
-- ECS Service Role: AmazonEC2ContainerServiceRole
-- CodeDeploy Role: AWSCodeDeployRoleForECS
-- **Note:** Admin-level credentials used for GitHub Actions demo; should use least-privilege policies in production
+- **ECS Task Execution Role:** AmazonECSTaskExecutionRolePolicy
+- **ECS Service Role:** AmazonEC2ContainerServiceRole
+- **CodeDeploy Role:** AWSCodeDeployRoleForECS
+- **Note:** Admin-level credentials used for GitHub Actions demo; in production, least-privilege policies should be enforced
 
 ## CI/CD Workflow
-- Infrastructure apply (`infra_apply`) job: Terraform plan & apply
-- Application deploy (`app_deploy`) job: build, push, task registration, CodeDeploy deployment
-- CLI used to handle task definition registration and CodeDeploy deployment due to JSON/AppSpec issues in GitHub Actions
+- **Infrastructure job (`infra_apply`)**: Terraform plan & apply
+  - Uses `dorny/paths-filter` to detect changes
+  - Sequential application ensures zero downtime
+  - Handles Fargate-level resource updates by registering new task definitions
+- **Application deployment job (`app_deploy`)**: build, push, task definition registration, CodeDeploy deployment
+  - AWS CLI used to handle task definition registration and CodeDeploy deployment due to JSON/AppSpec limitations in GitHub Actions
 
 ## Zero-Downtime Implementation
-- **Application:** Blue/Green deployment keeps old tasks alive until new tasks pass health checks
-- **Infrastructure:** Terraform sequencing prevents downtime using `depends_on`
-- Traffic shifts safely only after deployment success
-- Rollbacks occur automatically if failure detected
+- **Application Layer:**  
+  - Blue/Green deployment keeps old tasks alive until new tasks pass health checks
+  - Traffic shifts only after new tasks are healthy
+- **Infrastructure Layer:**  
+  - Terraform sequencing and `depends_on` prevent downtime when updating ECS, ALB, or VPC resources
+  - Infrastructure updates (CPU/memory) automatically trigger new Task Definition revisions, allowing seamless upgrades
+- **Rollback:** Auto rollback ensures failed deployments do not impact live traffic
 
-## Production Considerations & Lessons
-- ALB logs and CloudWatch for observability
-- Security: ECS tasks only accessible via ALB
-- IAM roles require fine-grained permissions
-- Future improvements: CI/CD testing, HTTPS, notifications (SNS/Slack)
+## Production Considerations & Lessons Learned
+- Observability: ALB access logs, CloudWatch logs, ECS container insights
+- Security: ECS tasks accessible only via ALB; fine-grained IAM permissions required
+- Future Improvements: CI/CD automated testing, HTTPS termination at ALB, real-time notifications (SNS/Slack), tighter IAM policies
