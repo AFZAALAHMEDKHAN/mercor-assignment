@@ -64,8 +64,9 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
 
 
+
   # ------------------------------------------------------------------
-  # 2. APPLICATION JOB (FINAL FIX: Pass JSON string to avoid file path error)
+  # 2. APPLICATION JOB (FINAL FIX: Use a Temporary File Path)
   # ------------------------------------------------------------------
   app_deploy:
     name: 🚀 Build and Deploy App
@@ -113,29 +114,29 @@ jobs:
           docker build -t $ECR_REGISTRY:$IMAGE_TAG ./app
           docker push $ECR_REGISTRY:$IMAGE_TAG
 
-      #  NEW/REPLACED STEP: Inject Variables and Export JSON String
-      - name: Inject Variables and Export Task Definition JSON
-        id: prepare_task_def_json
+      # 💥 FINAL SOLUTION STEP: Inject Variables and Write to Temporary File
+      - name: Inject Variables and Write Task Definition JSON
+        id: prepare_task_def_file
         run: |
           TASK_DEF_FILE="${{ env.TF_WORKING_DIR }}/task-definition-template.json"
+          TEMP_JSON_PATH="task-definition-${{ github.sha }}.json" # Unique temporary file name
           
-          # Use jq to safely inject the ARN and Image URI, storing the entire JSON object to output.
-          FINAL_TASK_DEF_JSON=$(jq --arg arn "${{ env.ECS_TASK_EXECUTION_ROLE_ARN }}" \
+          # Use jq to inject variables and write the result to a clean file
+          jq --arg arn "${{ env.ECS_TASK_EXECUTION_ROLE_ARN }}" \
              --arg image "${{ env.ECR_REPOSITORY_URL }}:${{ github.sha }}" \
              '.executionRoleArn = $arn | .containerDefinitions[0].image = $image' \
-             "$TASK_DEF_FILE")
-
-          # Export the validated JSON string directly to the job output
-          echo "::set-output name=json_content::$FINAL_TASK_DEF_JSON"
-        working-directory: ${{ github.workspace }}
+             "$TASK_DEF_FILE" > "$TEMP_JSON_PATH"
+          
+          # Export the path of the clean file
+          echo "::set-output name=final_td_path::$TEMP_JSON_PATH"
+        working-directory: ${{ github.workspace }} # Run from workspace root
 
       # Deploy to ECS via CodeDeploy
       - name: Deploy to ECS via CodeDeploy
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
-          #  FIX: Pass the raw JSON string content. The action's documentation suggests
-          # this input accepts both file path and JSON string content.
-          task-definition: ${{ steps.prepare_task_def_json.outputs.json_content }}
+          # 💥 FIX: Pass the guaranteed local file path
+          task-definition: ${{ steps.prepare_task_def_file.outputs.final_td_path }}
           service: ${{ env.ECS_SERVICE_NAME }}
           cluster: ${{ env.ECS_CLUSTER_NAME }}
           wait-for-service-stability: true
