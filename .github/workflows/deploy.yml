@@ -15,7 +15,7 @@ env:
 
 jobs:
   # ------------------------------------------------------------------
-  # 1. INFRASTRUCTURE JOB (Unchanged)
+  # 1. INFRASTRUCTURE JOB
   # ------------------------------------------------------------------
   infra_apply:
     name: 🏗️ Terraform Apply
@@ -65,14 +65,14 @@ jobs:
 
 
   # ------------------------------------------------------------------
-  # 2. APPLICATION JOB (Corrected Deployment Logic)
+  # 2. APPLICATION JOB (Build + Deploy with CodeDeploy)
   # ------------------------------------------------------------------
   app_deploy:
     name: 🚀 Build and Deploy App
     runs-on: ubuntu-latest
     environment: production
     
-    needs: [infra_apply] 
+    needs: [infra_apply]
     if: success() || always()
     
     steps:
@@ -92,7 +92,7 @@ jobs:
           terraform_version: 1.6.0
           terraform_wrapper: false
           
-      # Retrieve Outputs (Reads from S3 state and sets ENV vars)
+      # Retrieve Outputs (Reads from remote Terraform state)
       - name: Retrieve Infra Outputs from Remote State
         run: |
           terraform init
@@ -113,68 +113,62 @@ jobs:
           docker build -t $ECR_REGISTRY:$IMAGE_TAG ./app
           docker push $ECR_REGISTRY:$IMAGE_TAG
 
-      # ------------------------------------------------------------------
-      # 💥 CRITICAL STEP: Inject Variables, Register TD, and Trigger CodeDeploy CLI
-      # ------------------------------------------------------------------
-      - name: Register TD and Trigger CodeDeploy
-        id: register_and_deploy
+      # --------------------------------------------------------------
+      # Register new ECS Task Definition Revision
+      # --------------------------------------------------------------
+      - name: Register new ECS task definition revision
+        id: register-task
         run: |
-          # --- 1. PREPARE & REGISTER TASK DEFINITION (Guarantees Valid JSON) ---
-          TASK_DEF_FILE="${{ env.TF_WORKING_DIR }}/task-definition-template.json"
-          TEMP_TD_FILE="./rendered-task-definition.json"
-          
-          # Inject Task ARN and Image URI into the TD JSON using jq
-          jq --arg arn "${{ env.ECS_TASK_EXECUTION_ROLE_ARN }}" \
-             --arg image "${{ env.ECR_REPOSITORY_URL }}:${{ github.sha }}" \
-             '.executionRoleArn = $arn | .containerDefinitions[0].image = $image' \
-             "$TASK_DEF_FILE" > "$TEMP_TD_FILE"
+          echo "Fetching current task definition..."
+          TASK_DEF_ARN=$(aws ecs describe-services \
+            --cluster $ECS_CLUSTER_NAME \
+            --services $ECS_SERVICE_NAME \
+            --query "services[0].taskDefinition" \
+            --output text)
 
-          # Register the new Task Definition to get the clean, validated ARN
-          TASK_DEF_ARN=$(aws ecs register-task-definition \
-            --cli-input-json file://"$TEMP_TD_FILE" \
-            --region ${{ env.AWS_REGION }} \
-            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "Downloading current task definition JSON..."
+          aws ecs describe-task-definition \
+            --task-definition $TASK_DEF_ARN \
+            --query "taskDefinition" > taskdef.json
 
-          echo "Registered Task Definition: $TASK_DEF_ARN"
-          
-          # --- 2. PREPARE APPSPEC FOR REVISION (Inject Task ARN) ---
-          APPSPEC_PATH="app/appspec.yaml"
-          DEPLOY_APPSPEC="./deployment-appspec.yaml"
-          
-          # Copy AppSpec and inject the dynamic Task ARN and a dummy Listener ARN
-          # CodeDeploy requires these placeholders replaced, even though the Deployment Group manages traffic.
-          APPSPEC_CONTENT=$(cat "$APPSPEC_PATH")
-          
-          MODIFIED_APPSPEC_CONTENT=$(echo "$APPSPEC_CONTENT" | \
-            sed "s|<TASK_DEFINITION>|$TASK_DEF_ARN|g" | \
-            # Inject a placeholder for Listener ARN—CodeDeploy should ignore this, but it satisfies parser requirements
-            sed "s|<LISTENER_ARN>|arn:aws:elasticloadbalancing:${{ env.AWS_REGION }}:111111111111:listener/app/alb-name/listener-id|g") 
+          echo "Preparing new task definition JSON..."
+          NEW_IMAGE="$ECR_REPOSITORY_URL:${{ github.sha }}"
+          jq --arg IMAGE "$NEW_IMAGE" '.containerDefinitions[0].image = $IMAGE |
+            del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                .compatibilities, .registeredAt, .registeredBy)' \
+            taskdef.json > new-taskdef.json
 
-          echo "$MODIFIED_APPSPEC_CONTENT" > "$DEPLOY_APPSPEC"
-          
-          # --- 3. TRIGGER CODE DEPLOYMENT (Correct CLI Syntax) ---
-          
-          # Prepare content string for the --revision parameter (strip newlines/spaces and escape quotes)
-          REVISION_CONTENT=$(cat "$DEPLOY_APPSPEC" | tr -d '\n' | sed 's/"/\\"/g' | sed 's/ //g')
-          SHA_HASH=$(sha256sum "$DEPLOY_APPSPEC" | cut -d ' ' -f 1)
-          
-          # Use the 'AppSpecContent' revision type with the injected content
+          echo "Registering new ECS task definition revision..."
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-taskdef.json \
+            --query "taskDefinition.taskDefinitionArn" \
+            --output text)
+
+          echo "NEW_TASK_DEF_ARN=$NEW_TASK_DEF_ARN" >> $GITHUB_ENV
+
+      # --------------------------------------------------------------
+      # Trigger CodeDeploy Deployment (Blue/Green)
+      # --------------------------------------------------------------
+      - name: Create new CodeDeploy deployment
+        id: codedeploy
+        run: |
+          echo "Creating CodeDeploy deployment..."
           DEPLOYMENT_ID=$(aws deploy create-deployment \
-            --application-name ${{ env.PROJECT_NAME }}-codedeploy-app \
-            --deployment-group-name ${{ env.PROJECT_NAME }}-dg \
-            --deployment-config-name CodeDeployDefault.ECSAllAtOnce \
-            --description "GitHub Action deployment of Task $TASK_DEF_ARN" \
-            --file-exists-behavior OVERWRITE \
-            --revision "revisionType=AppSpecContent,appSpecContent={content=$REVISION_CONTENT,sha256=$SHA_HASH}" \
-            --query deploymentId --output text)
-
-          echo "CodeDeploy deployment started with ID: $DEPLOYMENT_ID"
+            --application-name "${{ env.PROJECT_NAME }}-app" \
+            --deployment-group-name "${{ env.PROJECT_NAME }}-dg" \
+            --revision revisionType=AppSpecContent,appSpecContent="{\"version\":1,\"Resources\":[{\"TargetService\":{\"Type\":\"AWS::ECS::Service\",\"Properties\":{\"TaskDefinition\":\"$NEW_TASK_DEF_ARN\",\"LoadBalancerInfo\":{\"ContainerName\":\"app-container\",\"ContainerPort\":80}}}}]}" \
+            --description "GitHub Actions deployment for commit ${{ github.sha }}" \
+            --query "deploymentId" \
+            --output text)
           
-          # 4. Wait for deployment completion
-          echo "Waiting for deployment to complete..."
-          aws deploy wait deployment-successful --deployment-id $DEPLOYMENT_ID || {
-             echo "Deployment failed. Check CodeDeploy console for details."
-             exit 1
-          }
+          echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> $GITHUB_ENV
+          echo "Deployment started with ID: $DEPLOYMENT_ID"
 
-        working-directory: ${{ github.workspace }}
+      # --------------------------------------------------------------
+      # Wait for CodeDeploy to Complete (Fail if Rollback or Error)
+      # --------------------------------------------------------------
+      - name: Wait for CodeDeploy deployment to finish
+        run: |
+          echo "Waiting for deployment $DEPLOYMENT_ID to complete..."
+          aws deploy wait deployment-successful --deployment-id $DEPLOYMENT_ID
+          echo "Deployment succeeded 🎉"
