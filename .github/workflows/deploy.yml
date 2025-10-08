@@ -1,7 +1,12 @@
 name: ECS Deployment (Infra + App)
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/**'
+      - 'infra/**'
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
